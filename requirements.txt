@@ -1,0 +1,9 @@
+pandas
+numpy
+panel
+plotly
+bokeh
+geopandas
+shapely
+pyproj
+requests
