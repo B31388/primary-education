@@ -10,13 +10,26 @@ df = pd.read_csv('education_data_long.csv')
 with open('uganda_districts.json') as f:
     uganda_geojson = json.load(f)
 
+# Prepare efficiency data with swapped correction
+enrollment_df = df[df['Metric'] == 'Gross Enrollment Ratio'].pivot(index=['District', 'Year'], columns='Metric', values='Value').reset_index()
+completion_df = df[df['Metric'] == 'Primary Completion Ratio'].pivot(index=['District', 'Year'], columns='Metric', values='Value').reset_index()
+efficiency_df = pd.merge(enrollment_df, completion_df, on=['District', 'Year'], how='inner')
+
+# Swap values where PCR > GER (indicating potential misentry)
+mask = (efficiency_df['Primary Completion Ratio'] > efficiency_df['Gross Enrollment Ratio']) & (efficiency_df['Gross Enrollment Ratio'].notna()) & (efficiency_df['Primary Completion Ratio'].notna())
+efficiency_df.loc[mask, ['Gross Enrollment Ratio', 'Primary Completion Ratio']] = efficiency_df.loc[mask, ['Primary Completion Ratio', 'Gross Enrollment Ratio']].values
+
+efficiency_df['Efficiency'] = (efficiency_df['Primary Completion Ratio'] / efficiency_df['Gross Enrollment Ratio'] * 100).fillna(0).clip(upper=100)  # Cap at 100%
+efficiency_df['Efficiency'] = efficiency_df['Efficiency'].where(efficiency_df['Gross Enrollment Ratio'].notna() & (efficiency_df['Gross Enrollment Ratio'] > 0), 0)  # Handle NaN/zero enrollment
+efficiency_df = efficiency_df[efficiency_df['Year'] == efficiency_df['Year'].max()]  # Use latest year
+
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
 
 app.layout = dbc.Container([
     dbc.Row(dbc.Col(html.H1("Education Access Dashboard (F-Pattern)", className="text-center mb-4"))),
     dbc.Row([
         dbc.Col([html.Label("Region"), dcc.Dropdown(id="region-filter", options=[{'label': r, 'value': r} for r in df['District'].unique()], value=None, clearable=True)], width=4),
-        dbc.Col([html.Label("Year"), dcc.Slider(id="year-slider", min=df['Year'].min(), max=df['Year'].max(), step=1, value=df['Year'].min(), marks={str(y): str(y) for y in df['Year'].unique()})], width=4),
+        dbc.Col([html.Label("Year"), dcc.Slider(id="year-slider", min=df['Year'].min(), max=df['Year'].max(), step=1, value=df['Year'].max(), marks={str(y): str(y) for y in df['Year'].unique()})], width=4),
         dbc.Col([html.Label("Metric"), dcc.Dropdown(id="metric-filter", options=[{'label': m, 'value': m} for m in df['Metric'].unique()], value=df['Metric'].unique()[0], clearable=True)], width=4)
     ]),
     dbc.Row([
@@ -45,13 +58,16 @@ def update_dashboard(region, year, metric):
     if metric:
         filtered_df = filtered_df[filtered_df['Metric'] == metric]
     
-    # Map figure
+    # Map figure with efficiency (red = low, green = high)
+    map_df = efficiency_df if not region else efficiency_df[efficiency_df['District'] == region]
+    map_df = map_df[map_df['Year'] == year]
     map_fig = px.choropleth_mapbox(
-        filtered_df, geojson=uganda_geojson,
-        locations="District", featureidkey="properties.District", color="Value",
+        map_df, geojson=uganda_geojson,
+        locations="District", featureidkey="properties.District", color="Efficiency",
         mapbox_style="carto-positron", zoom=6, center={"lat": 1.3733, "lon": 32.2903},
-        color_continuous_scale="Viridis", range_color=[0, 200]
-    ).update_traces(hovertemplate='District: %{location}<br>Value: %{z}<br>Year: %{customdata[0]}<extra></extra>', customdata=filtered_df[['Year']])
+        color_continuous_scale="RdYlGn", range_color=[0, 100],
+        title="District Efficiency (Completion/Enroll %) by Year"
+    ).update_traces(hovertemplate='District: %{location}<br>Efficiency: %{z}%<extra></extra>')
     
     # Enrollment vs Completion chart
     chart_df = df[df['Metric'].isin(['Gross Enrollment Ratio', 'Primary Completion Ratio'])].groupby(['Year', 'Metric'])['Value'].mean().reset_index()
